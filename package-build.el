@@ -306,6 +306,95 @@ Otherwise do nothing.  FORMAT-STRING and ARGS are as per that function."
   ;; TODO Use latest release if appropriate.
   (package-build--select-commit rcp "." nil))
 
+;;;; Release+Count
+
+;; TODO Deal with rewritten history.
+;;
+;; I.e., use "1.0.0.3.2" instead of "1.0.0.2" for rewritten
+;; "main" to ensure it is greater than "1.0.0.3".
+;;
+;; * [main] More
+;; * Foo+Bar+Baz
+;; | * [1.0.0.3] Baz
+;; | * Bar
+;; | * Foo
+;; |/
+;; * [1.0.0]
+
+(defun package-build-get-tag+count-version (rcp)
+  (pcase-let*
+      ((parts 3)
+       (`(,scommit ,stime ,_) (package-build-get-timestamp-version rcp))
+       (`(,tcommit ,ttime ,version) (package-build-get-tag-version rcp))
+       (version (version-to-list version))
+       (v (seq-take version parts))
+       (v (nconc v (make-list (max 0 (- parts (length v))) 0)))
+       (merge-base (package-build--merge-base rcp scommit tcommit))
+       (`(,ahead ,_behind)
+        (package-build--commit-counts rcp scommit tcommit)))
+    (cond
+     ((member merge-base (list scommit tcommit))
+      (cond
+       ((> ahead 0)
+        (list scommit stime (package-version-join (nconc v (list ahead)))))
+       ;; The latest commit that touched a relevant file is either the
+       ;; latest release itself or an earlier commit.  Distribute the
+       ;; same commit/release as on the stable channel; as it wouldn't
+       ;; make sense for the devel channel to be behind that.
+       ((<= (length version) parts)
+        ;; We can use the exact same version string as on the stable
+        ;; channel.
+        (list tcommit ttime (package-version-join version)))
+       (t
+        ;; Using the same version string as on the stable channel would
+        ;; likely cause version strings of future development snapshots
+        ;; to be smaller, which we must avoid.
+        (list tcommit ttime (package-version-join (nconc v (list 0)))))))
+     (t
+      ;; The latest tag is not reachable from the primary branch, which
+      ;; likely means that either all releases are done on a dedicated
+      ;; release branch, or that a maintenance branch exists and that
+      ;; the latest release is a maintenance release.
+      (cond
+       (merge-base
+        ;; The commit count is about commits since the merge-base, as
+        ;; opposed to since the unreachable release.
+        (list scommit stime (package-version-join (nconc v (list ahead)))))
+       (t
+        ;; There is no common history at all.  Use total number of
+        ;; reachable commits as the count.
+        (list scommit stime (package-version-join
+                             (nconc v (list (package-build--commit-count
+                                             rcp scommit)))))))))))
+
+(cl-defmethod package-build--merge-base ((_rcp package-git-recipe) a b)
+  (car (process-lines "git" "merge-base" a b)))
+
+(cl-defmethod package-build--commit-count ((_rcp package-git-recipe) rev)
+  (string-to-number (car (process-lines "git" "rev-list" "--count" rev))))
+
+(cl-defmethod package-build--commit-counts ((_rcp package-git-recipe) a b)
+  (mapcar #'string-to-number
+          (split-string (car (process-lines
+                              "git" "rev-list" "--count" "--left-right"
+                              (concat a "..." b)))
+                        "\t")))
+
+(cl-defmethod package-build--commit-ancestor-p ((_rcp package-git-recipe) a b)
+  (zerop (call-process "git" nil nil nil "merge-base" "--is-ancestor" a b)))
+
+(cl-defmethod package-build--merge-base ((_rcp package-hg-recipe) _a _b)
+  (error "Not implemented"))
+
+(cl-defmethod package-build--commit-count ((_rcp package-hg-recipe) _rev)
+  (error "Not implemented"))
+
+(cl-defmethod package-build--commit-counts ((_rcp package-hg-recipe) _a _b)
+  (error "Not implemented"))
+
+(cl-defmethod package-build--commit-ancestor-p ((_rcp package-hg-recipe) _a _b)
+  (error "Not implemented"))
+
 ;;; Run Process
 
 (defun package-build--run-process (command &rest args)
